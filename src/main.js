@@ -15,6 +15,7 @@ let customers = []
 let orders = []
 let orderDetails = []
 let cart = []
+let lastReceipt = null
 
 let currentCustomer = JSON.parse(
   localStorage.getItem('computerStoreCustomer') || 'null'
@@ -80,6 +81,7 @@ function layout(content,admin=false) {
           <button onclick="go('categories')">หมวดหมู่</button>
           <button onclick="go('customers')">ลูกค้า</button>
           <button onclick="go('orders')">ประวัติการขาย</button>
+          <button onclick="go('stock-history')">ประวัติสต็อก</button>
           <button onclick="adminLogout()">ออกจากระบบ</button>
           <button onclick="goPath('/')">กลับหน้าร้าน</button>
         `:`
@@ -107,6 +109,7 @@ function render() {
   if(page==='categories') renderCategories()
   if(page==='customers') renderCustomers()
   if(page==='orders') renderOrders()
+  if(page==='stock-history') renderStockHistory()
 }
 
 function categoryName(id) {
@@ -365,19 +368,22 @@ window.deleteCategory=async id=>{
 
 function renderCustomers() {
   layout(`
-    <h1>ลูกค้า</h1>
+    <h1>จัดการลูกค้า</h1>
     <section class="panel">
-      <h2>รายชื่อลูกค้า</h2>
       <table>
-        <thead><tr><th>ID</th><th>ชื่อ</th><th>เบอร์โทร</th><th>ที่อยู่</th></tr></thead>
+        <thead><tr><th>ID</th><th>ชื่อ</th><th>Email</th><th>เบอร์โทร</th></tr></thead>
         <tbody>${customers.map(c=>`
           <tr><td>${c.customer_id}</td><td>${esc(c.customer_name)}</td>
-          <td>${esc(c.phone||'-')}</td><td>${esc(c.address||'-')}</td></tr>
+          <td>${esc(c.email)}</td><td>${esc(c.phone||'-')}</td></tr>
         `).join('')}</tbody>
       </table>
     </section>
   `,true)
 }
+
+/* ===== ADMIN ORDERS ===== */
+
+
 
 /* ===== CUSTOMER LOGIN / REGISTER ===== */
 
@@ -430,13 +436,14 @@ window.registerCustomer=()=>{
     }
     if(customers.some(c=>c.phone===item.phone))return alert('เบอร์นี้ลงทะเบียนแล้ว')
 
-    const {data,error}=await supabase.from('customers').insert(item).select().single()
+    const {error}=await supabase.from('customers').insert(item)
     if(error)return alert(error.message)
     await loadData()
-    setCustomer(data)
+    currentCustomer=null
+    localStorage.removeItem('computerStoreCustomer')
     closeCustomerModal()
-    go('sales')
-    alert('ลงทะเบียนสำเร็จ')
+    alert('สมัครสมาชิกสำเร็จ กรุณาเข้าสู่ระบบ')
+    loginCustomer()
   }
 }
 
@@ -537,7 +544,8 @@ function saleProductCards(list) {
     <div class="product-card">
       <div class="product-image"><img src="${esc(p.image_url||placeholder)}" onerror="this.src='${placeholder}'"></div>
       <div class="product-info">
-        <h3>${esc(p.product_name)}</h3><p>คงเหลือ ${p.stock}</p>
+        <h3>${esc(p.product_name)}</h3>
+        <p>คงเหลือ ${p.stock}</p>
         <div class="price">${money(p.price)} บาท</div>
         <button class="primary" onclick="addCart(${p.product_id})" ${p.stock<=0?'disabled':''}>เพิ่มลงตะกร้า</button>
       </div>
@@ -546,36 +554,49 @@ function saleProductCards(list) {
 }
 
 window.searchSale=value=>{
-  const el=document.querySelector('#saleProducts')
-  if(el)el.innerHTML=saleProductCards(products.filter(p=>
-    p.product_name.toLowerCase().includes(value.toLowerCase())
-  ))
+  const list=products.filter(p=>(p.product_name||'').toLowerCase().includes(value.toLowerCase()))
+  document.querySelector('#saleProducts').innerHTML=saleProductCards(list)
 }
 
 window.addCart=id=>{
   const p=products.find(x=>x.product_id===id)
-  if(!p||p.stock<=0)return alert('สินค้าหมด')
+  if(!p)return
   const item=cart.find(x=>x.product_id===id)
   if(item){
-    if(item.quantity>=p.stock)return alert('สต็อกไม่พอ')
+    if(item.quantity>=p.stock)return alert('สินค้าในสต็อกไม่เพียงพอ')
     item.quantity++
-  }else cart.push({product_id:id,product_name:p.product_name,price:Number(p.price),quantity:1})
+  }else{
+    if(p.stock<=0)return alert('สินค้าหมด')
+    cart.push({...p,quantity:1})
+  }
   renderSales()
 }
 
-window.removeCart=i=>{cart.splice(i,1);renderSales()}
-window.clearCart=()=>{cart=[];renderSales()}
+window.removeCart=index=>{
+  cart.splice(index,1)
+  renderSales()
+}
+
+window.clearCart=()=>{
+  if(!confirm('ล้างตะกร้าสินค้าทั้งหมด?'))return
+  cart=[]
+  renderSales()
+}
+
+/* ===== CHECKOUT ===== */
 
 window.checkout=async()=>{
   if(!currentCustomer)return alert('กรุณา Login / ลงทะเบียนลูกค้าก่อน')
   if(!cart.length)return alert('กรุณาเลือกสินค้า')
 
+  await loadData()
   for(const item of cart){
-    const p=products.find(x=>x.product_id===item.product_id)
-    if(!p||p.stock<item.quantity)return alert('สินค้าไม่เพียงพอ')
+    const p=products.find(x=>String(x.product_id)===String(item.product_id))
+    if(!p||Number(p.stock)<item.quantity)return alert(`สินค้า ${p?.product_name||''} มีไม่เพียงพอ`)
   }
 
-  const total=cart.reduce((s,x)=>s+x.price*x.quantity,0)
+  const items=cart.map(x=>({...x}))
+  const total=items.reduce((s,x)=>s+Number(x.price)*x.quantity,0)
   if(!confirm(`ยืนยันสั่งซื้อ ${money(total)} บาท?`))return
 
   const {data:order,error}=await supabase.from('orders')
@@ -583,20 +604,86 @@ window.checkout=async()=>{
     .select().single()
   if(error)return alert(error.message)
 
-  const detail=cart.map(x=>({order_id:order.order_id,product_id:x.product_id,quantity:x.quantity,price:x.price}))
+  const detail=items.map(x=>({order_id:order.order_id,product_id:x.product_id,quantity:x.quantity,price:x.price}))
   const {error:de}=await supabase.from('order_details').insert(detail)
-  if(de)return alert(de.message)
+  if(de)return alert('สร้างรายการสั่งซื้อแล้ว แต่บันทึกรายละเอียดไม่สำเร็จ: '+de.message)
 
-  for(const item of cart){
-    const p=products.find(x=>x.product_id===item.product_id)
-    const {error}=await supabase.from('products').update({stock:p.stock-item.quantity}).eq('product_id',item.product_id)
-    if(error)return alert(error.message)
+  for(const item of items){
+    const p=products.find(x=>String(x.product_id)===String(item.product_id))
+    const {error}=await supabase.from('products').update({stock:Number(p.stock)-item.quantity}).eq('product_id',item.product_id)
+    if(error)return alert('บันทึกออเดอร์แล้ว แต่ตัดสต็อกไม่สำเร็จ: '+error.message)
   }
 
+  lastReceipt={
+    order_id:order.order_id,
+    order_date:order.order_date||new Date().toISOString(),
+    customer:{...currentCustomer},
+    items,
+    total
+  }
   cart=[]
   await loadData()
-  alert('สั่งซื้อสำเร็จ')
-  goPath('/admin')
+  renderReceipt()
+}
+
+function renderReceipt(){
+  if(!lastReceipt)return renderSales()
+  const r=lastReceipt
+  layout(`
+    <section class="panel receipt" id="receipt">
+      <div class="receipt-head">
+        <h1>🖥 COMPUTER STORE</h1>
+        <h2>ใบเสร็จรับเงิน / รายละเอียดคำสั่งซื้อ</h2>
+      </div>
+      <p><b>เลขที่คำสั่งซื้อ:</b> ${esc(r.order_id)}</p>
+      <p><b>วันที่:</b> ${new Date(r.order_date).toLocaleString('th-TH')}</p>
+      <hr>
+      <p><b>ลูกค้า:</b> ${esc(r.customer.customer_name)}</p>
+      <p><b>เบอร์โทร:</b> ${esc(r.customer.phone||'-')}</p>
+      <p><b>ที่อยู่:</b> ${esc(r.customer.address||'-')}</p>
+      <div class="table-scroll"><table>
+        <thead><tr><th>สินค้า</th><th>จำนวน</th><th>ราคาต่อชิ้น</th><th>รวม</th></tr></thead>
+        <tbody>${r.items.map(x=>`<tr><td>${esc(x.product_name)}</td><td>${x.quantity}</td><td>${money(x.price)}</td><td>${money(x.price*x.quantity)}</td></tr>`).join('')}</tbody>
+      </table></div>
+      <h2 class="receipt-total">ยอดรวมสุทธิ ${money(r.total)} บาท</h2>
+      <p style="text-align:center">ขอบคุณที่ใช้บริการ</p>
+    </section>
+    <div class="button-row no-print">
+      <button class="primary" onclick="printReceipt()">🖨 พิมพ์ใบเสร็จ</button>
+      <button onclick="go('store')">กลับหน้าร้าน</button>
+      <button onclick="go('sales')">ซื้อสินค้าต่อ</button>
+    </div>
+  `)
+}
+
+window.printReceipt=()=>window.print()
+
+/* ===== STOCK HISTORY ===== */
+window.renderStockHistory=async()=>{
+  layout('<h1>กำลังโหลดประวัติสต็อก...</h1>',true)
+  const {data,error}=await supabase.from('stock_movements')
+    .select('*').order('created_at',{ascending:false})
+  if(error){
+    layout(`<h1>ประวัติสต็อก</h1><section class="panel"><p>โหลดประวัติไม่สำเร็จ: ${esc(error.message)}</p></section>`,true)
+    return
+  }
+  const rows=data||[]
+  console.log('STOCK DATA:', data);
+  console.log('STOCK ERROR:', error);
+  layout(`
+    <h1>ประวัติการเข้า-ออกสต็อก</h1>
+    <section class="panel">
+      <div class="table-scroll"><table>
+        <thead><tr><th>วันที่</th><th>สินค้า ID</th><th>ประเภท</th><th>จำนวน</th><th>ก่อนเปลี่ยน</th><th>หลังเปลี่ยน</th><th>เหตุผล</th></tr></thead>
+        <tbody>${rows.map(m=>`<tr>
+          <td>${m.created_at?new Date(m.created_at).toLocaleString('th-TH'):'-'}</td>
+          <td>${esc(m.product_id)}</td>
+          <td>${m.movement_type==='IN'?'รับเข้า':m.movement_type==='OUT'?'เบิกออก':esc(m.movement_type)}</td>
+          <td>${esc(m.quantity)}</td><td>${esc(m.stock_before)}</td><td>${esc(m.stock_after)}</td><td>${esc(m.reason||'-')}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+    </section>
+  `,true)
 }
 
 /* ===== ADMIN ORDERS ===== */
@@ -609,8 +696,8 @@ function renderOrders() {
       <tbody>${orders.map(o=>{
         const customer=getCustomer(o.customer_id)
         const detail=orderDetails.filter(d=>
-  String(d.order_id)===String(o.order_id)
-  )
+          String(d.order_id)===String(o.order_id)
+        )
         const text=detail.map(d=>{
           const p=products.find(x=>x.product_id===d.product_id)
           return `${esc(p?.product_name||'สินค้า')} x ${d.quantity}`
@@ -622,6 +709,20 @@ function renderOrders() {
     </table></div></section>
   `,true)
 }
+
+/* ===== RECEIPT PRINT ===== */
+const printStyle=document.createElement('style')
+printStyle.textContent=`
+@media print {
+  body * { visibility:hidden !important; }
+  #receipt, #receipt * { visibility:visible !important; }
+  #receipt { position:absolute; left:0; top:0; width:100%; border:0; box-shadow:none; }
+  .no-print, .sidebar { display:none !important; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { border:1px solid #999; padding:8px; }
+}
+`
+document.head.appendChild(printStyle)
 
 /* ===== START ===== */
 
